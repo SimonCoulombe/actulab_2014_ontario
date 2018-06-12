@@ -1,0 +1,409 @@
+---
+title: "Découpe des territoires de l'Ontario"
+output: html_notebook
+---
+
+Ce programme vise à répondre au défi de l'actulab 2014, soit la découpe des
+territoires de l'Ontario.
+
+détails de la problématique : http://www.actulab.ca/resources/D%C3%A9fi%20du%20projet%20Desjardins.pdf
+
+présentation: 
+http://www.actulab.ca/resources/20140321-%20D%C3%A9fi%20Desjardins_AM.pptx
+
+je suis la méthodologie présentée ici:
+http://www.lexjansen.com/nesug/nesug10/hl/hl08.pdf
+incidemment, la carte avec 4 couleurs de la présentation (2e ligne) provient
+de ce papier.  Je n'ai rien découvert de nouveau, donc.
+
+Les données sont dans le répertoire
+M:\Recherche\34129 - Découpage Territorial Ontario\Ancien\BD
+fichier Donnees_territoires.xlsx
+validation avec Valideur.xlsm
+
+La présentation la plus récente sur le sujet est
+M:\Recherche\34129 - Découpage Territorial Ontario\Présentation\20150806 - AlgoClusTerr.pptx
+
+Les solutions proposées sont ici:
+M:\Recherche\34129 - Découpage Territorial Ontario\Ancien\Actulab
+
+La méthode est suivante: on part de 524 groupes.  À chaque étape, on fusionne
+deux groupes, ce qui réduit le nombre de groupes de 1.  On continue jusqu'à
+ce que j'ai le nombre de groupes souhaités (55 au total).
+
+Pour choisir quels groupes fusionnés, on choisis la fusion qui va impliquer
+la moins grande hausse de la déviance (somme des erreurs au carrés dans la rta, 
+pondérées par l'exposition de chaque rta ).
+
+On a deux contraintes: 
+1) maximum 10 groupes à toronto,
+2) minimum 7500 d'exposition par groupe
+
+Pour naviguer la contrainte de groupe à 2 niveaux on va procéder de la façon suivante:
+a) créer les 10 groupes à toronto
+b) ajouter les rta hors-toronto et continuer le modèle.  Les 10 groupes de 
+toronto peuvent donc prendre de l'expansion hors toronto.
+
+pour s'assurer d'avoir un minimum de 7500 exposition dans chaque groupe, j'accorde
+la priorité à certains fusions:
+haute priorité : un des groupes  a moins de 7500 expositions et un seul voisin (fusion obligatoire)
+moyenne priorité: un des groupes a moins de 7500 exposition (il faut donc le fusionner à un voisin, faut mieux donc tôt que tard)
+faible priorité: les deux groupes impliqués ont plus de 7500 expositions (pas d'urgence)
+
+TODO: parfois, quand on fusionne 2 groupes on en isole un troisième qui n'a pas 
+l'expositio nde 7500 et qui n'a plus que ce groupe fusionné comme voisin.  
+On est donc forcé de fusionner cet orphelin aux 2 groupes nouvellement fusionnés.
+C'est peut-être une occasion de reculer d'un pas, de fusionner l'orphelin a seulement
+un des deux membres du groupes de deux, et ensuite de continuer l'algorithme. 
+le membre non-fusionné de l'ancien groupe de deux va peut-être préférer être
+fusionné à un autre groupe.. 
+En tout cas, ce sont souvent ces fusions forcées qui font mal, 
+avec des déviances additionnelles > 100 000
+
+
+
+
+```{r packages-options}
+library(openxlsx)
+library(tidyverse)
+library(stringr)
+# library(microbenchmark)
+### todo ne pas mesurer tout et son contraire dans map2..
+```
+
+```{r fsa_info}
+data1 <- read.xlsx("data.xlsx", sheet="data")
+#fsa <- read.xlsx("data.xlsx", sheet="fsa")
+fsa <- data1 %>% filter(!is.na(no_terr)) %>% select(no_terr) %>% mutate( FSA = as.character(no_terr))
+data <- data1 %>% 
+  left_join(fsa, by = "no_terr") %>% 
+  select(FSA, everything()) 
+
+## partie gather, nest, map
+voisins_vect <-
+  data %>%
+  select(no_terr,n1, n2, n3, n4, n5, n6, n7, n8, n9 , starts_with("n1"), starts_with("n2"), starts_with("n3"))  %>%
+  gather(key, value, n1:n37) %>%
+  filter(value != "") %>%
+  nest(-no_terr) %>%
+  mutate(voisins = map(data, ~.x$value)) %>%
+  select (-data)
+
+fsa_info <- data %>%
+  left_join(voisins_vect, by= "no_terr")  %>%
+  select(-one_of("n1", "n2", "n3", "n4", "n5","n6","n7","n8","n9"),-starts_with("n1"),-starts_with("n2"),-starts_with("n3"))
+
+# liste de toutes les combinaisons de voisins no_terr (RTA anonyme) à l'intérieur de toronto (avec doublons)
+voisins_vert <- 
+  data %>% 
+  select(no_terr,n1, n2, n3, n4, n5, n6, n7, n8, n9 ,starts_with("n1"),starts_with("n2"),starts_with("n3"))  %>% 
+  gather(key, value, n1:n37) %>% 
+  filter(value != "") %>%
+  select(-key) %>%
+  rename( voisin = value) %>%
+  left_join(fsa_info %>% select(no_terr, tor), by = "no_terr") %>%
+  left_join(fsa_info %>% select(no_terr,tor) %>% rename (voisin = no_terr, tor_voisin = tor), by = "voisin")
+  
+# liste de toutes les combinaisons de voisins RTA à l'intérieur de toronto (avec doublons)
+voisins_FSA_vert <- voisins_vert %>% 
+  left_join(fsa %>% select(no_terr, FSA), by= "no_terr")  %>%
+  left_join(fsa %>% select(no_terr, FSA) %>% rename(voisin = no_terr, FSA_voisin = FSA), by= "voisin") %>%
+  arrange(FSA, FSA_voisin) %>%
+  select(-no_terr, -voisin)
+
+# liste de toutes les combinaisons de voisins RTA à l'intérieur de toronto (avec doublons)
+voisins_FSA_vert_tor <- voisins_vert %>% 
+  left_join(fsa %>% select(no_terr, FSA), by= "no_terr")  %>%
+  left_join(fsa %>% select(no_terr, FSA) %>% rename(voisin = no_terr, FSA_voisin = FSA), by= "voisin") %>%
+  arrange(FSA, FSA_voisin) %>%
+  select(-no_terr, -voisin)  %>%
+  filter(tor == 1, tor_voisin == 1)
+```
+
+```{r current_state}
+## BLOC AGGRÉGATION DES RTA DE TORONTO
+
+# current_state est la liste qui indique à quel groupe est attribué chaque RTA lors 
+# de l'itération actuelle.
+# au début, chaque RTA est dans le groupe Gxxx , où xxx correspond au RTA.
+# on sauvegarde la déviance entre la prime du groupe et la prime du rta afin de sauver
+# des calculs plus tard quand on va calculer l'augmentation de déviance lors de la fusion.
+
+current_state <-
+  fsa_info %>% 
+  filter(tor == 1) %>%  # toronto only pour commencer
+  mutate(groupe = str_c("G", FSA)) %>%
+  ungroup() %>% 
+  group_by(groupe) %>%
+    mutate(groupprime_pre = sum(prime * expo)/ sum(expo),
+           deviance_pre = expo * (prime - groupprime_pre) ^ 2 ) %>%
+    ungroup()
+
+# voisins_groupe sont voisins et peuvent donc être fusionnés?
+voisins_groupe <- voisins_FSA_vert_tor %>% 
+  left_join(current_state %>% select(FSA,groupe), by= "FSA")  %>% #groupe du fsa
+  left_join(current_state %>% select(FSA,groupe) %>% rename(FSA_voisin =FSA, groupe_voisin = groupe), by= "FSA_voisin") %>%
+  filter(groupe != groupe_voisin) %>%
+  distinct(groupe, groupe_voisin) 
+
+# sachant quels groupes sont voisins, on peut déterminer quel est le niveau de priorité (haut, moyen, faible) de chacun des groupes
+current_group <- current_state %>%
+  group_by(groupe) %>%
+  summarise(groupe_expo = sum(expo)) %>%
+  ungroup() %>%
+  left_join(voisins_groupe %>% count(groupe) %>% rename(nb_voisins = n), by = "groupe") %>%
+  mutate(groupe_priorite = ifelse( groupe_expo< 7500 & nb_voisins == 1,
+                                   2,
+                                   ifelse(groupe_expo < 7500,1,0))) %>%
+  ungroup()
+
+# on va seulement tester les fusions qui ont le plus haut niveau de priorité parmi toutes les fusions
+#possibles
+a_tester <- voisins_groupe %>% 
+  inner_join(current_group %>% filter(groupe_priorite == max(groupe_priorite)),
+             by = "groupe") %>%
+  mutate(n = row_number()) %>%  ## a partir d'ici on veut enlever les doublons de chaque paire.
+  gather(key,value, groupe, groupe_voisin) %>%
+  arrange(n,value) %>%
+  group_by(n) %>% 
+  mutate(key = if_else(row_number() == 1, "groupe", "groupe_voisin")) %>%
+  ungroup() %>%
+  spread(key=key, value= value)  %>%
+  distinct(groupe, groupe_voisin) 
+
+# avant je calculais la nouvelle somme de la déviance avec return_new_deviance,
+# mais au fond j'ai juste besoin de calculer l'augmentation de déviance avec return_dev_increase.
+# je pense que c'est plus rapide à calculer car on ne garde que les RTA des 2 groupes..
+
+# return_new_deviance <- function(x1, x2){
+#   temp <- current_state %>%
+#     mutate(groupe = ifelse(groupe==x1, x2, groupe)) %>%
+#     group_by(groupe) %>%
+#     mutate(groupprime = mean(prime),
+#            deviance = expo * (prime - groupprime) ^ 2 ) %>%
+#     ungroup() %>%
+#     summarise(deviance = sum(deviance))
+#   return(as.numeric(temp[1,1]))
+# }
+
+return_dev_increase <- function(x1, x2){
+  temp <- current_state %>% filter(groupe %in% c(x1, x2)) %>%
+    mutate(groupe = ifelse(groupe==x1, x2, groupe)) %>%
+    group_by(groupe) %>%
+    mutate(groupprime_post = sum(prime * expo)/ sum(expo),
+           deviance_post = expo * (prime - groupprime_post) ^ 2 ) %>%
+    ungroup() %>%
+    summarise(deviance = sum(deviance_post - deviance_pre))
+  return(as.numeric(temp[1,1]))
+}
+
+# mapped est un exemple d'utilisation de map2 hors mutate, au cas où ça servirait un jour.
+#mapped <- map2(a_tester$FSA, a_tester$groupe, return_new_deviance )  ## exemple de map2 hors d'un mutate
+
+# tracker l'évolution du programme
+n_groupes <- as.numeric(current_state %>% summarise(n_distinct = n_distinct(groupe)))
+n_options <- nrow(a_tester)
+iter <- 0
+dev <- 0
+progress <- data.frame(iter, dev, n_groupes, n_options)
+  
+
+# enfin ,la boucle qui va faire les fusions jusqu'à ce que j'atteigne l'objectif de 10 groupes à
+# toronto
+
+while  (n_groupes > 10 & n_options > 0) {
+  
+#on calcule l'augmentation de déviance de chacune des combinaisons de fusion à tester
+  mappedf <- a_tester %>% 
+  mutate(deviance =  unlist(map2(groupe, groupe_voisin, ~ return_dev_increase(.x, .y))))
+
+# la meilleur fusion est celle avec la plus faible déviance
+best_choice <- mappedf %>% arrange(deviance) %>% slice(1)
+
+#on met à jour current_state pour réfléter la nouvelle fusion (nouvelle prime de groupe)
+current_state <- current_state %>% 
+  mutate(
+    groupe = ifelse(groupe==best_choice$groupe, best_choice$groupe_voisin,  groupe)) %>%
+  group_by(groupe) %>%
+  mutate(groupprime_pre = sum(prime* expo) / sum(expo),
+         deviance_pre = expo * (prime - groupprime_pre) ^ 2 ) %>%
+  ungroup()
+
+# on met à jour la liste des groupes qui sont voisins
+voisins_groupe <- voisins_FSA_vert_tor %>% 
+  left_join(current_state %>% select(FSA,groupe), by= "FSA")  %>% #groupe du fsa
+  left_join(current_state %>% select(FSA,groupe) %>% rename(FSA_voisin =FSA, groupe_voisin = groupe), by= "FSA_voisin") %>%
+  filter(groupe != groupe_voisin) %>%
+  distinct(groupe, groupe_voisin)
+
+# on met à jour la liste de priorité des groupes
+current_group <- current_state %>%
+  group_by(groupe) %>%
+  summarise(groupe_expo = sum(expo)) %>%
+  ungroup() %>%
+  left_join(voisins_groupe %>% count(groupe) %>% rename(nb_voisins = n), by = "groupe") %>%
+  mutate(groupe_priorite = ifelse( groupe_expo< 7500 & nb_voisins == 1,
+                                   2,
+                                   ifelse(groupe_expo < 7500,1,0))) %>%
+  ungroup()
+
+# on met à jour la liste des fusions à tester
+a_tester <- voisins_groupe %>% 
+  inner_join(current_group %>% filter(groupe_priorite == max(groupe_priorite)),
+             by = "groupe") %>%
+  mutate(n = row_number()) %>%  ## a partir d'ici on veut enlever les doublons de chaque paire.
+  gather(key,value, groupe, groupe_voisin) %>%
+  arrange(n,value) %>%
+  group_by(n) %>% 
+  mutate(key = if_else(row_number() == 1, "groupe", "groupe_voisin")) %>%
+  ungroup() %>%
+  spread(key=key, value= value)  %>%
+  distinct(groupe, groupe_voisin) 
+
+
+# on met à jour les différents indicateurs.
+n_groupes <- as.numeric(current_state %>% summarise(n_distinct = n_distinct(groupe)))
+n_options <- nrow(a_tester)
+ iter <- iter + 1
+dev <- best_choice$deviance
+new_row <- data.frame(iter, dev, n_groupes, n_options, best_choice)
+progress <- bind_rows(progress, new_row)
+
+print(str_c("iter = ", iter," dev = ", dev, " n_groupes =", n_groupes, " n_options = ", n_options,  " best_choice = ", best_choice$groupe, " to ", best_choice$groupe_voisin, sep= ""))
+
+} # fin de la boucle while
+
+
+# une fois ça terminé on sauvegarde une backup
+current_state_bak <- current_state
+progress_bak <- progress
+progress %>% summarise(dev_sum = sum(dev))
+```
+
+
+
+```{r current-state-nat}
+## BLOC clustering de la province en entier 
+
+# on ajoute les RTA hors-toronto à current_state.  chacun de ces rta est dans son propre groupe.
+# la mécanique est la même que pour toronto.
+
+current_state <-
+  bind_rows(
+    current_state_bak, 
+    fsa_info %>% 
+      filter(tor == 0) %>%  # hors toronto
+      mutate(groupe = str_c("G", FSA)) %>%
+      ungroup()
+    )%>%
+  group_by(groupe) %>%
+    mutate(groupprime_pre = sum(prime* expo)/ sum(expo),
+           deviance_pre = expo * (prime - groupprime_pre) ^ 2 ) %>%
+    ungroup()
+  
+voisins_groupe <- voisins_FSA_vert %>% 
+  left_join(current_state %>% select(FSA,groupe), by= "FSA")  %>% #groupe du fsa
+  left_join(current_state %>% select(FSA,groupe) %>% rename(FSA_voisin =FSA, groupe_voisin = groupe), by= "FSA_voisin") %>%
+  filter(groupe != groupe_voisin) %>%
+  distinct(groupe, groupe_voisin)
+
+current_group <- current_state %>%
+  group_by(groupe) %>%
+  summarise(groupe_expo = sum(expo)) %>%
+  ungroup() %>%
+  left_join(voisins_groupe %>% count(groupe) %>% rename(nb_voisins = n), by = "groupe") %>%
+  mutate(groupe_priorite = ifelse( groupe_expo< 7500 & nb_voisins == 1,
+                                   2,
+                                   ifelse(groupe_expo < 7500,1,0))) %>%
+  ungroup()
+
+a_tester <- voisins_groupe %>% 
+  inner_join(current_group %>% filter(groupe_priorite == max(groupe_priorite)),
+             by = "groupe") %>%
+  mutate(n = row_number()) %>%  ## a partir d'ici on veut enlever les doublons de chaque paire.
+  gather(key,value, groupe, groupe_voisin) %>%
+  arrange(n,value) %>%
+  group_by(n) %>% 
+  mutate(key = if_else(row_number() == 1, "groupe", "groupe_voisin")) %>%
+  ungroup() %>%
+  spread(key=key, value= value)  %>%
+  distinct(groupe, groupe_voisin) 
+
+
+#mapped <- map2(a_tester$FSA, a_tester$groupe, return_new_deviance )  ## exemple de map2 hors d'un mutate
+
+# tracker l'évolution du programme
+n_groupes <- as.numeric(current_state %>% summarise(n_distinct = n_distinct(groupe)))
+n_options <- nrow(a_tester)
+##iter <- 0 reset pas iter
+## dev <- 0 reset pas déviance 
+#progress <- data.frame(iter, dev, n_groupes, n_options) # on reset pas progress
+  
+while  (n_groupes > 55 & n_options > 0) { #55 options
+mappedf <- a_tester %>% mutate(deviance =  unlist(map2(groupe, groupe_voisin, ~ return_dev_increase(.x, .y))))
+best_choice <- mappedf %>% arrange(deviance) %>% slice(1)
+
+current_state <- current_state %>% mutate(groupe = ifelse(groupe==best_choice$groupe, best_choice$groupe_voisin,  groupe))%>%
+  group_by(groupe) %>%
+    mutate(groupprime_pre = sum(prime * expo) / sum(expo),
+           deviance_pre = expo * (prime - groupprime_pre) ^ 2 ) %>%
+    ungroup()
+
+voisins_groupe <- voisins_FSA_vert %>% 
+  left_join(current_state %>% select(FSA,groupe), by= "FSA")  %>% #groupe du fsa
+  left_join(current_state %>% select(FSA,groupe) %>% rename(FSA_voisin =FSA, groupe_voisin = groupe), by= "FSA_voisin") %>%
+  filter(groupe != groupe_voisin) %>%
+  distinct(groupe, groupe_voisin)
+
+current_group <- current_state %>%
+  group_by(groupe) %>%
+  summarise(groupe_expo = sum(expo)) %>%
+  ungroup() %>%
+  left_join(voisins_groupe %>% count(groupe) %>% rename(nb_voisins = n), by = "groupe") %>%
+  mutate(groupe_priorite = ifelse( groupe_expo< 7500 & nb_voisins == 1,
+                                   2,
+                                   ifelse(groupe_expo < 7500,1,0))) %>%
+  ungroup()
+
+a_tester <- voisins_groupe %>% 
+  inner_join(current_group %>% filter(groupe_priorite == max(groupe_priorite)),
+             by = "groupe") %>%
+  mutate(n = row_number()) %>%  ## a partir d'ici on veut enlever les doublons de chaque paire.
+  gather(key,value, groupe, groupe_voisin) %>%
+  arrange(n,value) %>%
+  group_by(n) %>% 
+  mutate(key = if_else(row_number() == 1, "groupe", "groupe_voisin")) %>%
+  ungroup() %>%
+  spread(key=key, value= value)  %>%
+  distinct(groupe, groupe_voisin)
+
+n_groupes <- as.numeric(current_state %>% summarise(n_distinct = n_distinct(groupe)))
+n_options <- nrow(a_tester)
+ iter <- iter + 1
+dev <- best_choice$deviance
+new_row <- data.frame(iter, dev, n_groupes, n_options, best_choice)
+progress <- bind_rows(progress, new_row)
+
+print(str_c("iter = ", iter," dev = ", dev, " n_groupes =", n_groupes, " n_options = ", n_options,  " best_choice = ", best_choice$groupe, " to ", best_choice$groupe_voisin, sep= ""))
+}
+
+save(current_state, file = "./current_state.rdata")
+save(progress, file = "./progress.rdata")
+```
+
+```{r output.csv}
+load("./current_state.rdata")
+load("./progress.rdata")
+
+current_state %>% summarise(deviance = sum(deviance_pre)) #134835106
+
+write_csv(current_state %>% 
+  select(no_terr, groupe) %>% 
+  left_join(current_group %>% 
+              select(groupe) %>% 
+              mutate(id = row_number()),
+            by = "groupe") %>% 
+  arrange(no_terr), "./output.csv") ## output pour validateur
+```
+
+
